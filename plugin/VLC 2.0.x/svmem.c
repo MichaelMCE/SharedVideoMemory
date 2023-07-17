@@ -3,6 +3,7 @@
  *****************************************************************************
  * Copyright (C) 2008 the VideoLAN team
  * Copyrgiht (C) 2010 Rémi Denis-Courmont
+ * Copyrgiht (C) 2014 MichaelMcE
  *
  * Authors: Sam Hocevar <sam@zoy.org>
  *
