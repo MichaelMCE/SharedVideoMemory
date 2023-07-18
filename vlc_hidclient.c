@@ -1,4 +1,11 @@
 
+// libmylcd
+// An LCD framebuffer library
+// Michael McElligott
+// okio@users.sourceforge.net
+
+//  Copyright (c) 2005-2009  Michael McElligott
+// 
 //  This program is free software; you can redistribute it and/or
 //  modify it under the terms of the GNU LIBRARY GENERAL PUBLIC LICENSE
 //  as published by the Free Software Foundation; either version 2
@@ -29,11 +36,12 @@ vlc.exe --vout=svmem --svmem-width=854 --svmem-height=480 --svmem-chroma=RV16 "v
 #include <string.h>
 #include <conio.h>
 #include <inttypes.h>
+#include <math.h>
 
 #include "../libTeensyRawHid/libTeensyRawHid.h"
 #include "plugin/svmem.h"
 
-// display demensions 
+// will store display dimensions 
 static int DWIDTH = 0;
 static int DHEIGHT = 0;
 
@@ -121,10 +129,13 @@ int display_init ()
 	return 1;
 }
 
-static int updateDisplay (uint16_t *pixels, const int yOffset, const int stripHeight)
+// when source and destination widths match
+static int updateDisplay_aligned (uint16_t *pixels, const int yOffset, const int stripHeight)
 {
 	int ret = 0;
 	const int twrites = img.height / stripHeight;
+	
+
 	for (int i = 0; i < twrites; i++){
 		int y = i * stripHeight;
 		ret += libTeensyRawHid_WriteArea(&ctx, &pixels[y * img.width], 0, y+yOffset, img.width-1, yOffset+y+stripHeight-1);
@@ -140,9 +151,84 @@ static int updateDisplay (uint16_t *pixels, const int yOffset, const int stripHe
 	return (ret != 0);
 }
 
+// when source destination width is smaller than device width it must be realigned
+static int updateDisplay_unaligned (uint16_t *pixels, const int yOffset, const int stripHeight)
+{
+	int ret = 0;
+	const int twrites = img.height / stripHeight;
+	
+	uint16_t out[DWIDTH * stripHeight];
+	memset(out, 0, sizeof(out));
+	
+	int xOffset = (DWIDTH - img.width) / 2;
+	if (xOffset < 0) xOffset = 0;
+	
+	for (int i = 0; i < twrites; i++){
+		int y = i * stripHeight;
+		
+		for (int c = 0; c < stripHeight; c++)
+			memcpy(&out[(c*DWIDTH)+xOffset], &pixels[(y+c)*img.width], img.width*2);
+
+		ret += libTeensyRawHid_WriteArea(&ctx, out, 0, y+yOffset, DWIDTH-1, yOffset+y+stripHeight-1);
+	}
+
+	const int remaining = img.height % stripHeight;
+	if (remaining && ret){
+		for (int i = twrites; i < twrites+1; i++){
+			int y = i * stripHeight;
+			
+			for (int c = 0; c < remaining; c++)
+				memcpy(&out[c*DWIDTH], &pixels[(y+c) * img.width], img.width*2);
+
+			ret += libTeensyRawHid_WriteArea(&ctx, out, 0, y+yOffset, DWIDTH-1, yOffset+y+remaining-1);			
+		}
+	}
+	return (ret != 0);
+}
+
+// when source destination width is smaller than device width it must be realigned
+static int updateDisplay_unaligned_op (uint16_t *pixels, const int yOffset, const int stripHeight)
+{
+	int ret = 0;
+	const int twrites = img.height / stripHeight;
+
+	int xOffset = (DWIDTH - img.width) / 2;
+	if (xOffset < 0) xOffset = 0;
+	
+	for (int i = 0; i < twrites; i++){
+		int y = i * stripHeight;
+		ret += libTeensyRawHid_WriteArea(&ctx, &pixels[y*img.width], xOffset, y+yOffset, (DWIDTH-xOffset)-1, (yOffset+y+stripHeight)-1);
+	}
+
+	const int remaining = img.height % stripHeight;
+	if (remaining && ret){
+		for (int i = twrites; i < twrites+1; i++){
+			int y = i * stripHeight;
+			ret += libTeensyRawHid_WriteArea(&ctx,  &pixels[y*img.width], xOffset, y+yOffset, (DWIDTH-xOffset)-1, (yOffset+y+remaining)-1);			
+		}
+	}
+	return (ret != 0);
+}
+
+
+// display, source, best fit out
+void imageBestFit (const int bg_w, const int bg_h, int fg_w, int fg_h, int *w, int *h)
+{
+	const int fg_sar_num = 1; const int fg_sar_den = 1;
+	const int bg_sar_den = 1; const int bg_sar_num = 1;
+
+	if (fg_w < 1 || fg_w > 8191) fg_w = bg_w;
+	if (fg_h < 1 || fg_h > 8191) fg_h = bg_h;
+	*w = bg_w;
+	*h = (bg_w * fg_h * fg_sar_den * bg_sar_num) / (float)(fg_w * fg_sar_num * bg_sar_den);
+	if (*h > bg_h){
+		*w = (bg_h * fg_w * fg_sar_num * bg_sar_den) / (float)(fg_h * fg_sar_den * bg_sar_num);
+		*h = bg_h;
+	}
+}
+
 int main (int argc, char* argv[])
 {
-	
 	if (!display_init()){
 		printf("Display not found or connection in use\n");
 		return 0;
@@ -161,7 +247,6 @@ int main (int argc, char* argv[])
 			printf("Connected\n");
 			break;
 		}
-		Sleep(500);
 	};
 
 	if (gotMapHandle){
@@ -196,7 +281,7 @@ int main (int argc, char* argv[])
 				if (WaitForSingleObject(hDataLock, 1000) == WAIT_OBJECT_0){
 					
 					if (svmem->hdr.count < 2){
-						memset(img.frame, 0, sizeof(uint32_t)*DWIDTH*DHEIGHT);
+						memset(img.frame, 0, sizeof(uint16_t)*DWIDTH*DHEIGHT);
 						libTeensyRawHid_WriteImage(&ctx, img.frame);
 					}
 					
@@ -224,7 +309,18 @@ int main (int argc, char* argv[])
 					
 					ReleaseSemaphore(hDataLock, 1, NULL);
 
-					int devStatus = updateDisplay((uint16_t*)img.frame, img.yOffset, desc.u.cfg.stripHeight);	// stripHeight should match that of the display
+					//int w, h;
+					//imageBestFit(DWIDTH, DHEIGHT, svmem->hdr.swidth, svmem->hdr.sheight, &w, &h);
+					//printf("%i %i, %i %i, %i %i\n", DWIDTH, DHEIGHT, svmem->hdr.swidth, svmem->hdr.sheight, w, h);
+
+					int devStatus = 0;
+					if (img.width == DWIDTH)			// stripHeight should match that of the display
+						devStatus = updateDisplay_aligned((uint16_t*)img.frame, img.yOffset, desc.u.cfg.stripHeight);
+					else if ((abs(DWIDTH-img.width) > 32))	// intended for vertical videos
+						devStatus = updateDisplay_unaligned_op((uint16_t*)img.frame, img.yOffset, desc.u.cfg.stripHeight);
+					else
+						devStatus = updateDisplay_unaligned((uint16_t*)img.frame, img.yOffset, desc.u.cfg.stripHeight);
+
 					if (!devStatus) break;
 				}
 			}else{
