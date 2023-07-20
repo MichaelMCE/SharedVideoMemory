@@ -1,6 +1,6 @@
 This is intended for and only tested on VLC 32bit version 3.0.18.
 
-Copy the plugins folder to 32bit VLC's folder. Windows should ask you if you wish to overwrite an existing file. If it doesn't then you fucked up - Startover.
+Copy the plugins folder to 32bit VLC's folder.
 
 Now set VLC's location:
 Before starting, edit both the VLC_CaptureServer batch files, setting the location to 32bit VLC.
