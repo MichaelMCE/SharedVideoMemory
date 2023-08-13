@@ -20,6 +20,7 @@
 
 /*
 
+
 Intended as a client for the VLC 2.0.x shared video out plugin libsvmem_plugin.dll
 
 Start VLC before this:
@@ -38,7 +39,7 @@ vlc.exe --vout=svmem --svmem-width=854 --svmem-height=480 --svmem-chroma=RV16 "v
 #include <inttypes.h>
 #include <math.h>
 
-#include "../libTeensyRawHid/libTeensyRawHid.h"
+#include "../../libTeensyRawHid/libTeensyRawHid.h"
 #include "plugin/svmem.h"
 
 // will store display dimensions 
@@ -115,6 +116,7 @@ int display_init ()
 	ctx.height = desc.u.cfg.height;
 	ctx.pitch = desc.u.cfg.pitch;
 	ctx.rgbClamp = desc.u.cfg.rgbMax;
+	if (!desc.u.cfg.stripHeight) desc.u.cfg.stripHeight = 32;
 	
 	DWIDTH = ctx.width;
 	DHEIGHT = ctx.height;
@@ -192,19 +194,24 @@ static int updateDisplay_unaligned_op (uint16_t *pixels, const int yOffset, cons
 	int ret = 0;
 	const int twrites = img.height / stripHeight;
 
-	int xOffset = (DWIDTH - img.width) / 2;
+	int width = img.width;
+	int xOffset = (DWIDTH - width) / 2;
 	if (xOffset < 0) xOffset = 0;
+
+	int xOffsetFudge = 0;
+	if (width&0x01)		// if odd increase xoffset to offset smearing effect
+		xOffsetFudge = 1;
 	
 	for (int i = 0; i < twrites; i++){
 		int y = i * stripHeight;
-		ret += libTeensyRawHid_WriteArea(&ctx, &pixels[y*img.width], xOffset, y+yOffset, (DWIDTH-xOffset)-1, (yOffset+y+stripHeight)-1);
+		ret += libTeensyRawHid_WriteArea(&ctx, &pixels[y*width], xOffset+xOffsetFudge, y+yOffset, (DWIDTH-xOffset)-1, (yOffset+y+stripHeight)-1);
 	}
 
 	const int remaining = img.height % stripHeight;
 	if (remaining && ret){
 		for (int i = twrites; i < twrites+1; i++){
 			int y = i * stripHeight;
-			ret += libTeensyRawHid_WriteArea(&ctx,  &pixels[y*img.width], xOffset, y+yOffset, (DWIDTH-xOffset)-1, (yOffset+y+remaining)-1);			
+			ret += libTeensyRawHid_WriteArea(&ctx,  &pixels[y*width], xOffset+xOffsetFudge, y+yOffset, (DWIDTH-xOffset)-1, (yOffset+y+remaining)-1);
 		}
 	}
 	return (ret != 0);
@@ -247,7 +254,13 @@ int main (int argc, char* argv[])
 			printf("Connected\n");
 			break;
 		}
+		Sleep(50);
 	};
+
+
+	//MEMORY_BASIC_INFORMATION mbi = {0};
+	//VirtualQueryEx(GetCurrentProcess(), img.hMem, &mbi, sizeof(mbi));
+
 
 	if (gotMapHandle){
 		svmem = (TSVMEM*)img.hMem;
@@ -272,14 +285,12 @@ int main (int argc, char* argv[])
 		if (!img.frame) abort();
 
 
-		
 		while(!kbhit()){
 			// wait for the frame ready signal from the plugin
 			if (WaitForSingleObject(hUpdateEvent, 500) == WAIT_OBJECT_0){
 				// lock the IPC. 
 				// this also blocks VLC from updating the buffer
 				if (WaitForSingleObject(hDataLock, 1000) == WAIT_OBJECT_0){
-					
 					if (svmem->hdr.count < 2){
 						memset(img.frame, 0, sizeof(uint16_t)*DWIDTH*DHEIGHT);
 						libTeensyRawHid_WriteImage(&ctx, img.frame);
@@ -306,21 +317,23 @@ int main (int argc, char* argv[])
 
 					if (svmem->hdr.ssize && svmem->hdr.fsize)
 						memcpy(img.frame, (void*)&svmem->pixels, svmem->hdr.fsize);
-					
+
 					ReleaseSemaphore(hDataLock, 1, NULL);
 
-					//int w, h;
-					//imageBestFit(DWIDTH, DHEIGHT, svmem->hdr.swidth, svmem->hdr.sheight, &w, &h);
+					int w, h;
+					imageBestFit(DWIDTH, DHEIGHT, svmem->hdr.swidth, svmem->hdr.sheight, &w, &h);
 					//printf("%i %i, %i %i, %i %i\n", DWIDTH, DHEIGHT, svmem->hdr.swidth, svmem->hdr.sheight, w, h);
 
 					int devStatus = 0;
-					if (img.width == DWIDTH)			// stripHeight should match that of the display
+					if (w < DWIDTH){
+						int x = (DWIDTH - w) / 2;
+						devStatus = libTeensyRawHid_WriteArea(&ctx, img.frame, x, 0, x+w-1, h-1);
+					}else if (img.width == DWIDTH)			// stripHeight should match that of the display
 						devStatus = updateDisplay_aligned((uint16_t*)img.frame, img.yOffset, desc.u.cfg.stripHeight);
-					else if ((abs(DWIDTH-img.width) > 32))	// intended for vertical videos
+					else //if ((abs(DWIDTH-img.width) > 32))	// intended for vertical videos
 						devStatus = updateDisplay_unaligned_op((uint16_t*)img.frame, img.yOffset, desc.u.cfg.stripHeight);
-					else
-						devStatus = updateDisplay_unaligned((uint16_t*)img.frame, img.yOffset, desc.u.cfg.stripHeight);
-
+					//else
+					//	devStatus = updateDisplay_unaligned((uint16_t*)img.frame, img.yOffset, desc.u.cfg.stripHeight);
 					if (!devStatus) break;
 				}
 			}else{
